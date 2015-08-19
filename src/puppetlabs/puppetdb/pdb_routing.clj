@@ -89,8 +89,9 @@
    [:MaintenanceMode enable-maint-mode maint-mode? disable-maint-mode]]
   (init [this context]
         (let [url-prefix (get-route this)
-              shared-with-prefix #(assoc-in (shared-globals) [:globals :url-prefix] url-prefix)]
-          (set-url-prefix url-prefix)
+              query-prefix (str url-prefix "/query")
+              shared-with-prefix #(assoc (shared-globals) :url-prefix query-prefix)]
+          (set-url-prefix query-prefix)
           (add-ring-handler this (pdb-app url-prefix
                                           maint-mode?
                                           (pdb-core-routes shared-with-prefix
