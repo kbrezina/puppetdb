@@ -92,6 +92,9 @@
                              "latest_report_status" {:type :string
                                                      :queryable? true
                                                      :field :report_statuses.status}
+                             "latest_report_noop" {:type :boolean
+                                                     :queryable? true
+                                                     :field :reports.noop}
                              "catalog_environment" {:type :string
                                                     :queryable? true
                                                     :field :catalog_environment.environment}
