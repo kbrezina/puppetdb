@@ -28,6 +28,14 @@
      (binding [*db* db#]
        ~@body)))
 
+(defn execute!
+  "Calls clojure.jdbc/execute! after adding (jdbc/db) as the\n  first argument."
+  {:arglists '([[sql & params] :multi? false :transaction? true]
+                [[sql & param-groups] :multi? true :transaction? true])}
+  [sql-params & {:keys [transaction? multi?]
+                    :or {transaction? true multi? false}}]
+  (sql/execute! *db* sql-params transaction? multi?))
+
 (defn do-commands
   "Calls clojure.jdbc/db-do-commands after adding (jdbc/db) as the
   first argument."

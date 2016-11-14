@@ -14,7 +14,8 @@
   (:require [puppetlabs.trapperkeeper.logging :as logging-utils]
             [clojure.tools.namespace :as ns]
             [puppetlabs.puppetdb.utils :as utils]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [puppetlabs.puppetdb.scf.scratch]))
 
 (def ns-prefix "puppetlabs.puppetdb.cli.")
 

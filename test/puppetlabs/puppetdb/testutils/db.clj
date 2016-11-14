@@ -126,7 +126,8 @@
       (jdbc/with-db-connection (db-admin-config template-name)
         (jdbc/do-commands-outside-txn
          "create extension if not exists pg_trgm"
-         "create extension if not exists pgcrypto"))
+         "create extension if not exists pgcrypto"
+         "CREATE EXTENSION if not exists btree_gist")) ;; for time_range EXCLUDE constraints
       (let [cfg (db-user-config template-name)]
         (jdbc/with-db-connection cfg
           (migrate! cfg)))
