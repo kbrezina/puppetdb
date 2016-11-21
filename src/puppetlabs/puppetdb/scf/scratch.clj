@@ -8,11 +8,12 @@
             [clj-time.core :as time]
             [clj-time.format :as tformat]
             [clj-time.coerce :as tcoerce]
-            [clojure.java.jdbc :as sql])
+            [clojure.java.jdbc :as sql]
+            [clojure.set :as set])
   (:import [org.postgresql.util PGTimestamp]
            [java.util Calendar]))
 
-(def node-cnt 6000)
+(def node-cnt 25000)
 
 (defn ral-package-seq []
   (mapv (fn [[package-name package-map]]
@@ -29,8 +30,8 @@
               hash/generic-identity-hash
               sutils/munge-hash-for-storage)))
 
-(defn- deduplicate-by-name [col]
-  (-> (reduce (fn [m item] (assoc m (:name item) item))
+(defn- deduplicate-by-package-name [col]
+  (-> (reduce (fn [m item] (assoc m (:package-name item) item))
               {}
               col)
       vals))
@@ -47,7 +48,7 @@
                                   :version version
                                   :provider "yum"}))
                    (-> (repeatedly 5 #(rand-nth packages))
-                       deduplicate-by-name)))))
+                       deduplicate-by-package-name)))))
 
 (defn populate-common-packages [db]
   (jdbc/with-db-connection db
@@ -154,30 +155,54 @@
         (-> (jdbc/insert! :packages package)
             first)))))
 
-(defn- upgrade-packages [db packages upgrade-cnt]
-  "Store upgrade-cnt packages with higher versions to :packages and return mapping between the old and new ids"
-  (jdbc/with-db-connection db
-    (jdbc/with-db-transaction []
-      (reduce (fn [m entry] (merge m entry))
-              {}
-              (repeatedly upgrade-cnt
-                          #(let [old-package (rand-nth packages)
-                                 new-package (-> old-package
-                                                 (select-keys [:name :version :provider])
-                                                 (update :version str "1")
-                                                 assoc-hash)]
-                            {(:id old-package) (:id (store-package db new-package))}))))))
+(defn- gen-agent-packages [template-packages upgrade-cnt]
+  "Generate a sequence of packages from the given template and change version to upgrade-cnt of them."
+  (let [packages-to-upgrade        (repeatedly upgrade-cnt
+                                               #(rand-nth template-packages))
+        packages-to-upgrade-hashes (reduce (fn[s item] (conj s (:hash item)))
+                                           #{}
+                                           packages-to-upgrade)]
+    (concat (map (fn [{:keys [name version provider]}]
+                   (assoc-hash {:name name
+                                :version (str version "1")
+                                :provider provider}))
+                 packages-to-upgrade)
+            (filter (fn [{:keys [hash]}]
+                      (not (contains? packages-to-upgrade-hashes hash)))
+                    template-packages))))
+
+(defn- hashes->set [coll]
+  (->> coll
+       (map #(:hash %))
+       set))
+
+(defn- compare-package-colls [package-coll-old package-coll-new]
+  (let [hashes-old (hashes->set package-coll-old)
+        hashes-new (hashes->set package-coll-new)
+        removed (set/difference hashes-old hashes-new)
+        added   (set/difference hashes-new hashes-old)]
+    {:remove (filter #(contains? removed (:hash %)) package-coll-old)
+     :add    (filter #(contains? added (:hash %)) package-coll-new)}))
 
 (defn- agent-run [db certname-id timestamp upgrade-cnt]
   "Upgrade upgrade-cnt packages on the given node"
   (jdbc/with-db-connection db
     (jdbc/with-db-transaction []
-      (let [package-map (upgrade-packages db
-                                          (current-packages db certname-id timestamp)
-                                          upgrade-cnt)]
-        (doseq [[old-id new-id] package-map]
-          (store-diff db old-id certname-id timestamp :remove)
-          (store-diff db new-id certname-id timestamp :add))))))
+      (let [pdb-packages   (current-packages db certname-id timestamp)
+            agent-packages (gen-agent-packages pdb-packages upgrade-cnt)
+            package-diffs  (compare-package-colls pdb-packages agent-packages)]
+        (doseq [package (:add package-diffs)]
+          (store-diff db
+                      (:id (store-package db package))
+                      certname-id
+                      timestamp
+                      :add))
+        (doseq [package (:remove package-diffs)]
+          (store-diff db
+                      (:id package)
+                      certname-id
+                      timestamp
+                      :remove))))))
 
 (defn- timestamp->string [timestamp]
   (tformat/unparse (:date tformat/formatters) timestamp))

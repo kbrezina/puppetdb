@@ -1186,14 +1186,20 @@
     ["certname_id" "bigint not null"]
     ["time_range" "tstzrange not null"])
 
-   "ALTER TABLE PACKAGE_LIFETIMES
+   ;; Replaced by EXCLUDE CONSTRAINT
+   #_"ALTER TABLE PACKAGE_LIFETIMES
     ADD CONSTRAINT package_certname_time UNIQUE (package_id, certname_id, time_range)"
 
    ;; TODO needs postgrest extension  - CREATE EXTENSION btree_gist
    "ALTER TABLE PACKAGE_LIFETIMES
     ADD CONSTRAINT time_range_no_overlap EXCLUDE USING gist (package_id WITH =, certname_id WITH =, time_range WITH &&)"
 
-   "CREATE INDEX package_lifetimes_certname_id_time_range_idx on package_lifetimes(certname_id, time_range)"))
+   ;; TODO check if the GIST index is used
+   ;; For getting list of packages for a given node and timestamp
+   "CREATE INDEX package_lifetimes_certname_id_time_range_idx ON package_lifetimes USING gist (certname_id, time_range)"
+
+   ;; For GC - WHERE part makes the INDEX smaller
+   "CREATE INDEX package_lifetimes_upper_time_range ON package_lifetimes(upper(time_range)) WHERE NOT upper_inf(time_range)"))
 
 (def migrations
   "The available migrations, as a map from migration version to migration function."
