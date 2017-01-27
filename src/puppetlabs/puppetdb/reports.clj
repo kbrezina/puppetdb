@@ -45,6 +45,14 @@
    :tags [s/Str]
    :time pls/Timestamp})
 
+(def package-wireformat-schema
+  {:name s/Str
+   :ensure [s/Str]
+   :provider s/Str})
+
+(def inventory-wireformat-schema
+  {(s/optional-key :package) [package-wireformat-schema]})
+
 (def report-wireformat-schema
   {:certname s/Str
    :puppet_version s/Str
@@ -65,7 +73,8 @@
    :metrics [metric-wireformat-schema]
    :logs [log-wireformat-schema]
    :environment s/Str
-   :status (s/maybe s/Str)})
+   :status (s/maybe s/Str)
+   :inventory (s/maybe inventory-wireformat-schema)})
 
 (defn update-resource-events
   [update-fn]
@@ -77,7 +86,7 @@
 (def report-v7-wireformat-schema
   (let [update-fn #(dissoc % :corrective_change)]
     (-> report-wireformat-schema
-        (dissoc :producer :noop_pending :corrective_change)
+        (dissoc :producer :noop_pending :corrective_change (s/optional-key :inventory))
         (update :resources #(mapv (update-resource-events update-fn) %)))))
 
 (def report-v6-wireformat-schema

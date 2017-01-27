@@ -47,6 +47,7 @@ Puppet::Reports.register_report(:puppetdb) do
       defaulted_cached_catalog_status = defined?(cached_catalog_status) ? cached_catalog_status : nil
       defaulted_noop_pending = defined?(noop_pending) ? noop_pending : nil
       defaulted_corrective_change = defined?(corrective_change) ? corrective_change : nil
+      defaulted_inventory = defined?(inventory) ? build_inventory_hash : nil
 
       {
         "certname" => host,
@@ -68,7 +69,8 @@ Puppet::Reports.register_report(:puppetdb) do
         "catalog_uuid" => defaulted_catalog_uuid,
         "code_id" => defaulted_code_id,
         "cached_catalog_status" => defaulted_cached_catalog_status,
-        "producer" => Puppet[:node_name_value]
+        "producer" => Puppet[:node_name_value],
+        "inventory" => defaulted_inventory
       }
     end
   end
@@ -129,6 +131,23 @@ Puppet::Reports.register_report(:puppetdb) do
         metrics_list.concat(metric_hashes)
       end
       metrics_list
+    end
+  end
+
+  # @return Hash
+  # @api private
+  def build_inventory_hash
+    profile("Build inventory hash",
+            [:puppetdb, :inventory_hash, :build]) do
+      packages = inventory['package'].map do |package|
+        ensures = package['ensure']
+        {
+          'name' => package['name'],
+          'ensure' => (ensures.kind_of?(Array) ? ensures : [ ensures ]),
+          'provider' => package['provider']
+        }
+      end
+      {'package' => packages}
     end
   end
 

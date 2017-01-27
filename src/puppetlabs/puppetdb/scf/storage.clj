@@ -45,8 +45,11 @@
             [puppetlabs.puppetdb.jdbc :refer [query-to-vec]]
             [puppetlabs.puppetdb.time :refer [to-timestamp]]
             [honeysql.core :as hcore]
-            [puppetlabs.i18n.core :refer [trs]])
+            [puppetlabs.i18n.core :refer [trs]]
+            [cheshire.core :as json])
   (:import [org.postgresql.util PGobject]
+           [org.postgresql.util PGTimestamp]
+           [java.util Calendar]
            [org.joda.time Period]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -1177,6 +1180,95 @@
                                    reports/resources->resource-events
                                    (map normalize-resource-event)))))
 
+(defn- hashes->set
+  [result-set]
+  (->> result-set
+      (map #(get % :hash))
+      set))
+
+(defn- resource-ids-and-hashes
+  [certname-id]
+  (jdbc/query
+    [(format "SELECT r.id, %s AS hash FROM resources r JOIN node_resources nr ON nr.resource_id = r.id WHERE nr.certname_id = ?"
+             (sutils/sql-hash-as-str "r.hash"))
+     certname-id]))
+
+(defn- munge-jsonb
+  [m]
+  (sutils/str->pgobject
+   "jsonb"
+   (json/encode m)))
+
+(defn- assoc-hash
+  [m]
+  (assoc m :hash (shash/generic-identity-hash m)))
+
+(defn- inventory->resources
+  [inventory]
+
+  (for [[type res-vec] inventory
+        res res-vec
+        version (:ensure res)]
+    (assoc-hash
+      {:type (name type)
+       :title (:name res)
+       :parameters (munge-jsonb {:version version})})))
+
+(defn- certnames-id-and-resource_inventory_time
+  [certname]
+  (jdbc/query-with-resultset
+   ["SELECT id, resource_inventory_time FROM certnames WHERE certname = ?" certname]
+   (comp first sql/result-set-seq)))
+
+(defn- resource-not-used
+  [resource-id]
+  (-> ["SELECT 1 FROM node_resources WHERE resource_id = ? LIMIT 1" resource-id]
+     jdbc/query
+     empty?))
+
+(defn- remove-redundant-resource!
+  [resource-id]
+  (when (resource-not-used resource-id)
+        (jdbc/delete! :resources ["id = ?" resource-id])))
+
+(defn- remove-node-resources!
+  [certname-id resources]
+  (doseq [{resource-id :id} resources]
+    (jdbc/delete! :node_resources ["certname_id = ? AND resource_id = ?" certname-id resource-id])
+    (remove-redundant-resource! resource-id)))
+
+(pls/defn-validated ensure-row-by-hash :- (s/maybe s/Int)
+  "Check if the given row (defined by `row-map` exists in `table`, creates it if it does not. Always returns
+   the id of the row (whether created or existing)"
+  [table :- s/Keyword
+   row-map :- {s/Keyword s/Any}]
+  (when row-map
+        (if-let [id (query-id table {:hash (:hash row-map)})]
+                id
+                (create-row table row-map))))
+
+(pls/defn-validated ensure-resource :- (s/maybe s/Int)
+  "Check if the given `resource` exists, creates it if it does not. Always returns
+   the id of the `resource` (whether created or existing)"
+  [resource :- {s/Keyword s/Any}]
+  (when resource
+        (ensure-row-by-hash :resources resource)))
+
+(defn- add-node-resources!
+  [certname-id resources]
+  (doseq [resource resources]
+         (jdbc/insert! :node_resources {:certname_id certname-id
+                                        :resource_id (-> resource
+                                                         (update :hash sutils/munge-hash-for-storage)
+                                                         ensure-resource)})))
+
+(defn- update-resource_inventory_time!
+  [certname resource_inventory_time]
+  {:pre [(string? certname)]}
+  (jdbc/update! :certnames
+                {:resource_inventory_time resource_inventory_time}
+                ["certname=?" certname]))
+
 (s/defn add-report!*
   "Helper function for adding a report.  Accepts an extra parameter, `update-latest-report?`, which
   is used to determine whether or not the `update-latest-report!` function will be called as part of
@@ -1189,16 +1281,33 @@
          (let [{:keys [puppet_version certname report_format configuration_version producer
                        producer_timestamp start_time end_time transaction_uuid environment
                        status noop metrics logs resources resource_events catalog_uuid
-                       code_id cached_catalog_status noop_pending corrective_change]
+                       code_id cached_catalog_status noop_pending corrective_change inventory]
                 :as report} (normalize-report orig-report)
                 report-hash (shash/report-identity-hash report)]
+
            (jdbc/with-db-transaction []
-             (let [shash (sutils/munge-hash-for-storage report-hash)]
-               (when-not (-> "select 1 from reports where hash = ? limit 1"
+             (let [{certname-id :id
+                    resource_inventory_time :resource_inventory_time} (certnames-id-and-resource_inventory_time certname)
+                   shash (sutils/munge-hash-for-storage report-hash)]
+
+                (when (and (not (empty? inventory))
+                           (or (nil? resource_inventory_time)
+                               (> (.getTime end_time) (.getTime resource_inventory_time))))
+                      (let [agent-resources    (inventory->resources inventory)
+                            agent-hashes       (hashes->set agent-resources)
+                            existing-resources (resource-ids-and-hashes certname-id)
+                            existing-hashes    (hashes->set existing-resources)
+                            to-remove          (set/difference existing-hashes agent-hashes)
+                            to-add             (set/difference agent-hashes existing-hashes)]
+
+                           (remove-node-resources! certname-id (filter #(contains? to-remove (:hash %)) existing-resources))
+                           (add-node-resources! certname-id (filter #(contains? to-add (:hash %)) agent-resources)))
+                      (update-resource_inventory_time! certname end_time))
+
+                  (when-not (-> "select 1 from reports where hash = ? limit 1"
                              (query-to-vec shash)
                              seq)
-                 (let [certname-id (certname-id certname)
-                       row-map {:hash shash
+                 (let [row-map {:hash shash
                                 :transaction_uuid (sutils/munge-uuid-for-storage transaction_uuid)
                                 :catalog_uuid (sutils/munge-uuid-for-storage catalog_uuid)
                                 :code_id code_id

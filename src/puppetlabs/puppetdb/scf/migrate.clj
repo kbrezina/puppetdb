@@ -1161,6 +1161,34 @@
   (jdbc/do-commands
     "CREATE INDEX resource_events_status_for_corrective_change_idx ON resource_events (status) WHERE corrective_change"))
 
+(defn add-resource-inventory
+  []
+  (jdbc/do-commands
+
+    "CREATE SEQUENCE resource_id_seq cycle"
+
+    (sql/create-table-ddl
+      :resources
+      [["id" "bigint NOT NULL PRIMARY KEY DEFAULT nextval('resource_id_seq')"]
+       ["hash" "bytea NOT NULL UNIQUE"]
+       ["type" "text NOT NULL"]
+       ["title" "text NOT NULL"]
+       ["parameters" "jsonb"]])
+
+    "CREATE INDEX resources_type_title_idx ON resources(type, title)"
+    "CREATE INDEX resources_parameters_idx ON resources USING gin (parameters jsonb_path_ops)"
+    "CREATE INDEX resources_version_idx ON resources((parameters->>'version'))"                 ;; TODO remove
+
+    (sql/create-table-ddl
+      :node_resources
+      [["certname_id" "bigint NOT NULL REFERENCES certnames(id) ON DELETE CASCADE"]
+       ["resource_id" "bigint NOT NULL REFERENCES resources(id)"]])
+
+    "CREATE INDEX node_resources_certname_idx ON node_resources (certname_id)"
+    "CREATE INDEX node_resources_resource_idx ON node_resources (resource_id)"
+
+    "ALTER TABLE certnames ADD COLUMN resource_inventory_time timestamp with time zone"))
+
 (def migrations
   "The available migrations, as a map from migration version to migration function."
   {28 init-through-2-3-8
@@ -1191,7 +1219,8 @@
    50 remove-historical-catalogs
    51 fact-values-value-to-jsonb
    52 resource-params-cache-parameters-to-jsonb
-   53 add-corrective-change-index})
+   53 add-corrective-change-index
+   54 add-resource-inventory})
 
 
 (def desired-schema-version (apply max (keys migrations)))
