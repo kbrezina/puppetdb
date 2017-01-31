@@ -1167,11 +1167,13 @@
 
     "CREATE SEQUENCE resource_id_seq cycle"
 
+    "CREATE TYPE resource_type AS ENUM ('package')"
+
     (sql/create-table-ddl
       :resources
       [["id" "bigint NOT NULL PRIMARY KEY DEFAULT nextval('resource_id_seq')"]
        ["hash" "bytea NOT NULL UNIQUE"]
-       ["type" "text NOT NULL"]
+       ["type" "resource_type NOT NULL"]
        ["title" "text NOT NULL"]
        ["parameters" "jsonb"]])
 

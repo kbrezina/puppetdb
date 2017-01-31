@@ -328,7 +328,11 @@
    schema won't work."
   [kwd-schema]
   (reduce-kv (fn [acc k v]
-               (assoc acc (schema.core/required-key (puppetlabs.puppetdb.utils/kwd->str k)) v))
+               (let [str-k (-> k
+                               schema.core/explicit-schema-key
+                               puppetlabs.puppetdb.utils/kwd->str)]
+                 (assoc acc (if (schema.core/optional-key? k) (schema.core/optional-key k)
+                                                              (schema.core/required-key k)) v)))
              {} kwd-schema))
 
 (defn dashes->underscores

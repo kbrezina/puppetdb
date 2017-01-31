@@ -50,7 +50,8 @@
   (:import [org.postgresql.util PGobject]
            [org.postgresql.util PGTimestamp]
            [java.util Calendar]
-           [org.joda.time Period]))
+           [org.joda.time Period]
+           [java.sql Timestamp]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Schemas
@@ -1181,64 +1182,84 @@
                                    (map normalize-resource-event)))))
 
 (defn- hashes->set
+  "Extract hashes from the given vector of maps"
   [result-set]
   (->> result-set
       (map #(get % :hash))
       set))
 
-(defn- resource-ids-and-hashes
+(defn- resources-ids-and-hashes
+  "Retrieve resource ids and hashes that are associated with the given certname-id"
   [certname-id]
+  {:pre [(integer? certname-id)]}
   (jdbc/query
     [(format "SELECT r.id, %s AS hash FROM resources r JOIN node_resources nr ON nr.resource_id = r.id WHERE nr.certname_id = ?"
              (sutils/sql-hash-as-str "r.hash"))
      certname-id]))
 
-(defn- munge-jsonb
-  [m]
-  (sutils/str->pgobject
-   "jsonb"
-   (json/encode m)))
-
 (defn- assoc-hash
+  "Generate an identity hash based on the given map and associate the hash with the map"
   [m]
   (assoc m :hash (shash/generic-identity-hash m)))
 
-(defn- inventory->resources
-  [inventory]
+(def ^:private inventory-schema
+  {:package [{:name String
+              :ensure [String]}]})
 
+(def ^:private resource-schema
+  {:hash String
+   :type String
+   :title String
+   :parameters {:version String}})
+
+(pls/defn-validated ^:private inventory->resources :- [resource-schema]
+  "Convert inventory structure into resources"
+  [inventory :- inventory-schema]
   (for [[type res-vec] inventory
         res res-vec
         version (:ensure res)]
     (assoc-hash
       {:type (name type)
        :title (:name res)
-       :parameters (munge-jsonb {:version version})})))
+       :parameters {:version version}})))
 
 (defn- certnames-id-and-resource_inventory_time
+  "Retrieve id and resource_inventory_time from the `certnames` table by certname"
   [certname]
+  {:pre [(string? certname)]}
   (jdbc/query-with-resultset
-   ["SELECT id, resource_inventory_time FROM certnames WHERE certname = ?" certname]
-   (comp first sql/result-set-seq)))
+    ["SELECT id, resource_inventory_time FROM certnames WHERE certname = ?" certname]
+    (comp first sql/result-set-seq)))
 
 (defn- resource-not-used
+  "Check if resource is used in the `node_resources` table"
   [resource-id]
+  {:pre [(integer? resource-id)]
+   :post [((some-fn true? false?) %)]}
   (-> ["SELECT 1 FROM node_resources WHERE resource_id = ? LIMIT 1" resource-id]
-     jdbc/query
-     empty?))
+      jdbc/query
+      empty?))
 
 (defn- remove-redundant-resource!
+  "Remove a record from the `resources` table if the record identified by given resource-id is not used
+   in the `node_resources` table"
   [resource-id]
+  {:pre [(integer? resource-id)]}
   (when (resource-not-used resource-id)
         (jdbc/delete! :resources ["id = ?" resource-id])))
 
-(defn- remove-node-resources!
-  [certname-id resources]
+(s/defn ^:private remove-node-resources!
+  "Remove the given resources from the `node_resources` table. Remove the resources that are no longer mapped to any node
+   from the `resources` table."
+  [certname-id :- s/Int
+   resources :- [{:id s/Int
+                  s/Keyword s/Any}]]
   (doseq [{resource-id :id} resources]
     (jdbc/delete! :node_resources ["certname_id = ? AND resource_id = ?" certname-id resource-id])
     (remove-redundant-resource! resource-id)))
 
-(pls/defn-validated ensure-row-by-hash :- (s/maybe s/Int)
-  "Check if the given row (defined by `row-map` exists in `table`, creates it if it does not. Always returns
+(s/defn ^:private ensure-row-by-hash :- (s/maybe s/Int)
+  "Check if the given row (identified by `hash`) exists in `table`, creates it if it does not. Always returns
    the id of the row (whether created or existing)"
   [table :- s/Keyword
    row-map :- {s/Keyword s/Any}]
@@ -1247,27 +1268,33 @@
                 id
                 (create-row table row-map))))
 
-(pls/defn-validated ensure-resource :- (s/maybe s/Int)
+(s/defn ^:private ensure-resource :- (s/maybe s/Int)
   "Check if the given `resource` exists, creates it if it does not. Always returns
    the id of the `resource` (whether created or existing)"
-  [resource :- {s/Keyword s/Any}]
+  [resource :- resource-schema]
   (when resource
         (ensure-row-by-hash :resources resource)))
 
-(defn- add-node-resources!
-  [certname-id resources]
+(s/defn ^:private add-node-resources!
+  "Store node - resource mapping to the `node_resources` table. If needed store even the given resource
+   to the `resources` table."
+  [certname-id :- s/Int
+   resources :- [resource-schema]]
   (doseq [resource resources]
          (jdbc/insert! :node_resources {:certname_id certname-id
                                         :resource_id (-> resource
                                                          (update :hash sutils/munge-hash-for-storage)
+                                                         (update :parameters sutils/munge-jsonb-for-storage)
                                                          ensure-resource)})))
 
 (defn- update-resource_inventory_time!
-  [certname resource_inventory_time]
-  {:pre [(string? certname)]}
+  "Given a certname-id, update resource_inventory_time in the `certnames` table."
+  [certname-id resource_inventory_time]
+  {:pre [(integer? certname-id)
+         (instance? java.sql/Timestamp resource_inventory_time)]}
   (jdbc/update! :certnames
                 {:resource_inventory_time resource_inventory_time}
-                ["certname=?" certname]))
+                ["certname_id=?" certname-id]))
 
 (s/defn add-report!*
   "Helper function for adding a report.  Accepts an extra parameter, `update-latest-report?`, which
@@ -1290,19 +1317,22 @@
                     resource_inventory_time :resource_inventory_time} (certnames-id-and-resource_inventory_time certname)
                    shash (sutils/munge-hash-for-storage report-hash)]
 
-                (when (and (not (empty? inventory))
+                (when (and (some? certname-id)
+                           (not (empty? inventory))
                            (or (nil? resource_inventory_time)
                                (> (.getTime end_time) (.getTime resource_inventory_time))))
                       (let [agent-resources    (inventory->resources inventory)
                             agent-hashes       (hashes->set agent-resources)
-                            existing-resources (resource-ids-and-hashes certname-id)
+                            existing-resources (resources-ids-and-hashes certname-id)
                             existing-hashes    (hashes->set existing-resources)
-                            to-remove          (set/difference existing-hashes agent-hashes)
-                            to-add             (set/difference agent-hashes existing-hashes)]
+                            to-remove-hashes   (set/difference existing-hashes agent-hashes)
+                            to-add-hashes      (set/difference agent-hashes existing-hashes)]
 
-                           (remove-node-resources! certname-id (filter #(contains? to-remove (:hash %)) existing-resources))
-                           (add-node-resources! certname-id (filter #(contains? to-add (:hash %)) agent-resources)))
-                      (update-resource_inventory_time! certname end_time))
+                           (remove-node-resources! certname-id
+                                                   (filter #(contains? to-remove-hashes (:hash %)) existing-resources))
+                           (add-node-resources! certname-id
+                                                (filter #(contains? to-add-hashes (:hash %)) agent-resources)))
+                      (update-resource_inventory_time! certname-id end_time))
 
                   (when-not (-> "select 1 from reports where hash = ? limit 1"
                              (query-to-vec shash)

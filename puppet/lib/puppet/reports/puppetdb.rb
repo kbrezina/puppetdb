@@ -144,7 +144,6 @@ Puppet::Reports.register_report(:puppetdb) do
         {
           'name' => package['name'],
           'ensure' => (ensures.kind_of?(Array) ? ensures : [ ensures ]),
-          'provider' => package['provider']
         }
       end
       {'package' => packages}
